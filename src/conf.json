@@ -1,0 +1,11 @@
+{
+    "primaryNodes": [
+        "/home/comatose/tmp/node1"
+        , "/home/comatose/tmp/node2"
+        , "/home/comatose/tmp/node3"
+    ]
+    , "secondaryNodes": 
+    [
+        "/home/comatose/tmp/node4"
+    ]
+}
