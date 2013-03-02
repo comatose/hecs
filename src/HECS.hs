@@ -4,23 +4,24 @@
 
 module Main where
 
-import           Codec.Encryption.Padding  (pkcs5, unPkcs5)
-import qualified Codec.FEC                 as F
-import           Codec.Utils               (listFromOctets, listToOctets)
+import           Codec.Encryption.Padding (pkcs5, unPkcs5)
+import qualified Codec.FEC                as F
+import           Codec.Utils              (listFromOctets, listToOctets)
 import           Control.Exception
 import           Control.Monad
-import qualified Data.ByteString           as B
-import qualified Data.ByteString.Internal  as B
+import           Data.Array
+import qualified Data.ByteString          as B
+import qualified Data.ByteString.Internal as B
 import           Foreign.C.Error
-import           Foreign.ForeignPtr        (withForeignPtr)
-import           Foreign.Ptr               (plusPtr)
-import           Prelude                   hiding (catch)
-import           System.Directory          (getDirectoryContents)
+import           Foreign.ForeignPtr       (withForeignPtr)
+import           Foreign.Ptr              (plusPtr)
+import           Prelude                  hiding (catch)
+import           System.Console.Haskeline
+import           System.Directory         (getDirectoryContents)
 import           System.Fuse
 import           System.IO
 import           System.Posix
-import qualified Text.JSON.Generic         as J
-import Data.Array
+import qualified Text.JSON.Generic        as J
 
 defaultChunkSize :: Int
 defaultChunkSize = 4
@@ -214,7 +215,7 @@ hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Er
 hecsRead _ _ (HECS prims _) count off =
   handle (\(_ :: SomeException) -> fmap Left getErrno) $
   fmap (Right . B.concat) (mapM readChunk . toPhyAddrs prims off . fromIntegral $ count )
-  where 
+  where
     readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
     readChunk (fd, goff, len) = do
       _ <- fdSeek fd AbsoluteSeek goff
@@ -224,7 +225,7 @@ hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Eithe
 hecsWrite _ _ (HECS prims _) src off =
   handle (\(_ :: SomeException) -> fmap Left getErrno) $
   fmap (Right . sum) (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . B.length $ src)
-  where 
+  where
     writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
     writeChunk (fd, goff, B.PS fptr soff len) = do
       _ <- fdSeek fd AbsoluteSeek goff
