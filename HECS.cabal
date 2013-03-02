@@ -1,27 +1,29 @@
 cabal-version: >= 1.2.3
-name: hecfs
-synopsis: hecfs
-description: hecfs
+name: HECS
+synopsis: Erasure-coded Storage using HFuse
+description: Erasure-coded Storage using HFuse
 author: Boncheol Gu
 maintainer: boncheol.gu@gmail.com
 license: BSD3
 license-file: LICENSE
 version: 0.1
 build-type:Simple
-category: FFI
-executable 
+category: Filesystem
+executable HECS
   main-is:             
-    Main.hs
+    HECS.hs
   -- other-modules:       
   build-depends:
     base >= 3 && < 5
     , fec >= 0.1
-    , cryptohash ==0.8.*
-    , crypto-api ==0.10.*
-    , bytestring ==0.9.*
-    , haskeline ==0.7.*
-    , json ==0.7.*
-    , cryptocipher
+    , bytestring
+    , haskeline
+    , json
+    , Crypto
+    , array
+    , unix
+    , HFuse
+    , directory
   ghc-options:
     -Wall
   hs-source-dirs:

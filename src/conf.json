@@ -1,11 +1,11 @@
 {
     "primaryNodes": [
-        "/home/comatose/tmp/node1"
-        , "/home/comatose/tmp/node2"
-        , "/home/comatose/tmp/node3"
+        "/home/comatose/Workspace/hecs/src/node1"
+        , "/home/comatose/Workspace/hecs/src/node2"
+        , "/home/comatose/Workspace/hecs/src/node3"
     ]
     , "secondaryNodes": 
     [
-        "/home/comatose/tmp/node4"
+        "/home/comatose/Workspace/hecs/src/node4"
     ]
 }

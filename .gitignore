@@ -1,3 +1,7 @@
 /test/*
 *.hi
 *.o
+/dist/*
+/src/HECS
+/src/mnt*
+/src/node*
