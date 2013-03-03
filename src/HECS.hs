@@ -214,20 +214,20 @@ hecsRead _ _ (HECS prims _) count off =
   -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   fmap (Right . B.concat) (mapM readChunk . toPhyAddrs prims off . fromIntegral $ count )
 
+readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
+readChunk (fd, goff, len) = do
+  _ <- fdSeek fd AbsoluteSeek goff
+  B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
+
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
 hecsWrite _ _ hecs@(HECS prims _) src off =
   -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   do
     n0 <- fmap sum (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . fromIntegral . B.length $ src)
-    mapM_ (`completeStripe` hecs) [start..(end n0)]
+    -- mapM_ (`completeStripe` hecs) [start..(end n0)]
     return . Right $ n0
       where start = fromIntegral off `quot` (V.length prims * defaultChunkSize)
             end n = (fromIntegral off + fromIntegral n - 1) `quot` (V.length prims * defaultChunkSize)
-
-readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
-readChunk (fd, goff, len) = do
-  _ <- fdSeek fd AbsoluteSeek goff
-  B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
 
 writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
 writeChunk (fd, goff, B.PS fptr soff len) = do
