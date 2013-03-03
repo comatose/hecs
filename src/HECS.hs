@@ -7,7 +7,7 @@ module Main where
 import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import qualified Codec.FEC                as F
 import           Codec.Utils              (listFromOctets, listToOctets)
-import           Control.Exception
+import           Control.Exception        (handle)
 import           Control.Monad
 import           Data.Array
 import qualified Data.ByteString          as B
@@ -16,19 +16,21 @@ import           Foreign.C.Error
 import           Foreign.ForeignPtr       (withForeignPtr)
 import           Foreign.Ptr              (plusPtr)
 import           Prelude                  hiding (catch)
-import           System.Console.Haskeline
+import           System.Console.Haskeline hiding (handle)
 import           System.Directory         (getDirectoryContents)
 import           System.Fuse
 import           System.IO
 import           System.Posix
 import qualified Text.JSON.Generic        as J
 
-defaultChunkSize :: Int
+defaultChunkSize :: ByteCount
 defaultChunkSize = 4
 
 data Config = Config{ primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
 
 data HECS = HECS (Array Int Fd) (Array Int Fd)
+
+type ChunkIndex = Int
 
 asPrimary :: String -> Config -> [String]
 asPrimary path cfg = map (++ path) (primaryNodes cfg)
@@ -194,15 +196,21 @@ hecsOpen cfg path0 mode flags =
        ss <- mapM (\path -> openFd path mode Nothing flags) (asSecondary path0 cfg)
        return . Right $ HECS (listArray (0, length ps - 1) ps) (listArray (0, length ss - 1) ss)
 
-toPhyAddrs :: Array Int Fd -> FileOffset -> Int -> [(Fd, FileOffset, ByteCount)]
-toPhyAddrs fds (COff off0) len0 = go (quotRem (fromIntegral off0) defaultChunkSize) (fromIntegral len0)
-  where go (chunkNo, off) len
-          | len == 0 = []
-          | len <= (defaultChunkSize - off) = [trans (chunkNo, off, len)]
-          | otherwise = trans (chunkNo, off, defaultChunkSize - off) : go (chunkNo + 1, 0) (len - (defaultChunkSize - off))
-        trans (chunkNo, off, bc) =
-          let (q, nodeNo) = chunkNo `quotRem` length (elems fds)
-          in (fds ! nodeNo, fromIntegral $ q * defaultChunkSize + off, fromIntegral bc)
+quotRem' :: (Integral a, Integral a1, Num t, Num t1) => a -> a1 -> (t, t1)
+quotRem' x y = let (q, r) = quotRem (fromIntegral x) (fromIntegral y) in (fromIntegral q, fromIntegral r)
+
+toPhyAddrs :: Array Int Fd -> FileOffset -> ByteCount -> [(Fd, FileOffset, ByteCount)]
+toPhyAddrs fds off0 len0 = go (quotRem' off0 defaultChunkSize) (fromIntegral len0)
+  where
+    go :: (ChunkIndex, FileOffset) -> ByteCount -> [(Fd, FileOffset, ByteCount)]
+    go (chunkNo, off) len
+      | len == 0 = []
+      | len <= (defaultChunkSize - fromIntegral off) = [trans (chunkNo, off, len)]
+      | otherwise = trans (chunkNo, off, defaultChunkSize - fromIntegral off) : go (chunkNo + 1, 0) (len - (defaultChunkSize - fromIntegral off))
+    trans :: (ChunkIndex, FileOffset, ByteCount) -> (Fd, FileOffset, ByteCount)
+    trans (chunkNo, off, bc) =
+      let (q, nodeNo) = chunkNo `quotRem` length (elems fds)
+      in (fds ! nodeNo, fromIntegral q * fromIntegral defaultChunkSize + off, bc)
 
 toPhyChunks :: B.ByteString -> [(Fd, FileOffset, ByteCount)] -> [(Fd, FileOffset, B.ByteString)]
 toPhyChunks buf ((fd, off, len):rest)
@@ -224,7 +232,7 @@ hecsRead _ _ (HECS prims _) count off =
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
 hecsWrite _ _ (HECS prims _) src off =
   handle (\(_ :: SomeException) -> fmap Left getErrno) $
-  fmap (Right . sum) (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . B.length $ src)
+  fmap (Right . sum) (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . fromIntegral . B.length $ src)
   where
     writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
     writeChunk (fd, goff, B.PS fptr soff len) = do
@@ -270,6 +278,13 @@ hecsSetOwnerAndGroup cfg path0 uid gid =
 -- hecsReadSymbolicLink cfg path =
 --     do target <- readSymbolicLink . head $ asPrimary path cfg
 --        return (Right target)
+
+splitSize :: ByteCount -> ByteCount -> [ByteCount]
+splitSize k sz = let (q, r) = sz `quotRem` (fromIntegral k * defaultChunkSize)
+                     go n (x:xs) | n > defaultChunkSize = (x + defaultChunkSize) : go (n - defaultChunkSize) xs
+                                 | otherwise = (x + n) : xs
+                     go _ [] = []
+                 in go r $ replicate (fromIntegral k) (q * defaultChunkSize)
 
 -- hecsSetFileSize :: Config -> FilePath -> FileOffset -> IO Errno
 -- hecsSetFileSize cfg path off =
