@@ -215,9 +215,9 @@ hecsRead _ _ (HECS prims _) count off =
   fmap (Right . B.concat) (mapM readChunk . toPhyAddrs prims off . fromIntegral $ count )
 
 readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
-readChunk (fd, goff, len) = do
-  _ <- fdSeek fd AbsoluteSeek goff
-  B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
+readChunk (fd, goff, len) =
+  do _ <- fdSeek fd AbsoluteSeek goff
+     B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
 hecsWrite _ _ hecs@(HECS prims _) src off =
@@ -237,6 +237,9 @@ writeChunk (fd, goff, B.PS fptr soff len) = do
 readStripe :: StripeIndex -> V.Vector Fd -> IO (V.Vector B.ByteString)
 readStripe si =
   V.mapM (\fd -> readChunk (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
+
+-- padZero :: V.Vector B.ByteString -> V.Vector B.ByteString
+-- padZero
 
 writeStripe :: StripeIndex -> V.Vector Fd -> V.Vector B.ByteString -> IO (V.Vector ByteCount)
 writeStripe si =
