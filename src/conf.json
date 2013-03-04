@@ -1,11 +1,11 @@
 {
     "primaryNodes": [
-        "/home/comatose/Workspace/hecs/src/node1"
-        , "/home/comatose/Workspace/hecs/src/node2"
-        , "/home/comatose/Workspace/hecs/src/node3"
+        "/home/comatose/Workspace/hackage/hecs/src/node1"
+        , "/home/comatose/Workspace/hackage/hecs/src/node2"
+        , "/home/comatose/Workspace/hackage/hecs/src/node3"
     ]
     , "secondaryNodes": 
     [
-        "/home/comatose/Workspace/hecs/src/node4"
+        "/home/comatose/Workspace/hackage/hecs/src/node4"
     ]
 }

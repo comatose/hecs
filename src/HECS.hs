@@ -11,6 +11,7 @@ import           Codec.Utils              (listFromOctets, listToOctets)
 import           Control.Monad
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B
+import           Data.Monoid              ((<>))
 import qualified Data.Vector              as V
 import           Foreign.C.Error
 import           Foreign.ForeignPtr       (withForeignPtr)
@@ -224,7 +225,7 @@ hecsWrite _ _ hecs@(HECS prims _) src off =
   -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   do
     n0 <- fmap sum (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . fromIntegral . B.length $ src)
-    -- mapM_ (`completeStripe` hecs) [start..(end n0)]
+    mapM_ (`completeStripe` hecs) [start..(end n0)]
     return . Right $ n0
       where start = fromIntegral off `quot` (V.length prims * defaultChunkSize)
             end n = (fromIntegral off + fromIntegral n - 1) `quot` (V.length prims * defaultChunkSize)
@@ -238,8 +239,8 @@ readStripe :: StripeIndex -> V.Vector Fd -> IO (V.Vector B.ByteString)
 readStripe si =
   V.mapM (\fd -> readChunk (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
 
--- padZero :: V.Vector B.ByteString -> V.Vector B.ByteString
--- padZero
+padZero :: [B.ByteString] -> [B.ByteString]
+padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)
 
 writeStripe :: StripeIndex -> V.Vector Fd -> V.Vector B.ByteString -> IO (V.Vector ByteCount)
 writeStripe si =
@@ -247,8 +248,12 @@ writeStripe si =
 
 completeStripe :: StripeIndex -> HECS -> IO ()
 completeStripe si (HECS prims secos) = do
-  _ <- readStripe si prims >>= writeStripe si secos
+  _ <- readStripe si prims >>=
+       return. F.encode (F.fec k n) . padZero . V.toList >>=
+       writeStripe si secos . V.fromList
   return ()
+    where k = V.length prims
+          n = k + V.length secos
 
 hecsFlush :: Config -> FilePath -> HT -> IO Errno
 hecsFlush _ _ _ = return eOK
@@ -280,17 +285,20 @@ hecsSetOwnerAndGroup cfg path0 uid gid =
        mapM_ (\path -> setOwnerAndGroup path uid gid) paths
        return eOK
 
-splitSize :: Int -> FileOffset -> [FileOffset]
-splitSize k sz = let (q, r) = sz `quotRem` (fromIntegral k * defaultChunkSize)
-                     go n (x:xs) | n > defaultChunkSize = (x + defaultChunkSize) : go (n - defaultChunkSize) xs
-                                 | otherwise = (x + n) : xs
-                     go _ [] = []
-                 in go r $ replicate k (q * defaultChunkSize)
+splitSize :: Int -> Int -> FileOffset -> [FileOffset]
+splitSize k k' sz =
+  let (q, r) = sz `quotRem'` (k * defaultChunkSize)
+      go n (x:xs) | n > defaultChunkSize = (x + defaultChunkSize) : go (n - defaultChunkSize) xs
+                  | otherwise = (x + n) : xs
+      go _ [] = []
+  in go r (replicate k (q * defaultChunkSize)) <> replicate k' ((q + 1) * defaultChunkSize)
 
 hecsSetFileSize :: Config -> FilePath -> FileOffset -> IO Errno
 hecsSetFileSize cfg path0 off =
-    do let paths = asPrimary path0 cfg
-       zipWithM_ setFileSize paths (splitSize (length paths) off)
+    do let prims = asPrimary path0 cfg
+           secos = asSecondary path0 cfg
+       zipWithM_ setFileSize (prims <> secos)
+         (splitSize (length prims) (length secos) off)
        return eOK
 
 -- hecsCreateSymbolicLink :: Config -> FilePath -> FilePath -> IO Errno
