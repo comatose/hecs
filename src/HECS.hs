@@ -183,8 +183,9 @@ hecsCreateDevice cfg path0 entryType mode dev =
 hecsOpen :: Config -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
 hecsOpen cfg path0 mode flags =
   -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
-  do ps <- mapM (\path -> openFd path mode Nothing flags) (asPrimary path0 cfg)
-     ss <- mapM (\path -> openFd path mode Nothing flags) (asSecondary path0 cfg)
+  do ps <- mapM (\path -> openFd path ReadWrite Nothing flags) (asPrimary path0 cfg)
+     ss <- mapM (\path -> openFd path ReadWrite Nothing flags) (asSecondary path0 cfg)
+     print (ps, ss)
      return . Right $ HECS (V.fromList ps) (V.fromList ss)
 
 quotRem' :: (Integral a, Integral a1, Num t, Num t1) => a -> a1 -> (t, t1)
@@ -232,6 +233,7 @@ hecsWrite _ _ hecs@(HECS prims _) src off =
 
 writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
 writeChunk (fd, goff, B.PS fptr soff len) = do
+  print (fd, len)
   _ <- fdSeek fd AbsoluteSeek goff
   withForeignPtr fptr $ \ptr -> fdWriteBuf fd (ptr `plusPtr` soff) (fromIntegral len)
 
