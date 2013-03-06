@@ -1,21 +1,26 @@
 {-# LANGUAGE DeriveDataTypeable        #-}
+{-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
+{-# LANGUAGE TypeSynonymInstances      #-}
 
 module Main where
 
 import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import qualified Codec.FEC                as F
 import           Codec.Utils              (listFromOctets, listToOctets)
--- import           Control.Exception        (handle)
 import           Control.Monad
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B
+import           Data.Either
 import           Data.Monoid              ((<>))
 import qualified Data.Vector              as V
+import           Data.Word
+import           Foreign                  (with)
 import           Foreign.C.Error
 import           Foreign.ForeignPtr       (withForeignPtr)
-import           Foreign.Ptr              (plusPtr)
+import           Foreign.Ptr              (castPtr, plusPtr)
+import           Foreign.Storable
 import           Prelude                  hiding (catch)
 import           System.Console.Haskeline hiding (handle)
 import           System.Directory         (getDirectoryContents)
@@ -34,6 +39,35 @@ data HECS = HECS (V.Vector Fd) (V.Vector Fd)
 type ChunkIndex = Int
 
 type StripeIndex = Int
+
+-- (file size, id)
+type Metadata = (FileOffset, Word8)
+
+instance Storable Metadata where
+  sizeOf _ = sizeOf (undefined :: FileOffset) + sizeOf (undefined :: Word8)
+  alignment _ = alignment (undefined :: FileOffset)
+  peek p = do
+    off <- peek (castPtr p)
+    id <- peek (p `plusPtr` sizeOf off)
+    return (off, id)
+  poke p (off, id) = do
+    poke (castPtr p) off
+    poke (p `plusPtr` sizeOf off) id
+
+metadataSize :: (Integral a) => a
+metadataSize = fromIntegral . sizeOf $ (undefined :: Metadata)
+
+readMetadata :: Fd -> IO Metadata
+readMetadata fd =
+  do _ <- fdSeek fd AbsoluteSeek 0
+     let md = (0, 0) :: Metadata
+     with md $ \ptr -> fdReadBuf fd (castPtr ptr) metadataSize >> peek ptr
+
+writeMetadata :: Metadata -> Fd -> IO ()
+writeMetadata md fd =
+  do _ <- fdSeek fd AbsoluteSeek 0
+     with md $ \ptr -> fdWriteBuf fd (castPtr ptr) metadataSize
+     return ()
 
 asPrimary :: String -> Config -> [String]
 asPrimary path cfg = map (++ path) (primaryNodes cfg)
@@ -103,28 +137,34 @@ fileStatusToEntryType status
     | otherwise                = Unknown
 
 fileStatusToFileStat :: FileStatus -> FileOffset -> FileStat
-fileStatusToFileStat status size' =
+fileStatusToFileStat status size =
     FileStat { statEntryType        = fileStatusToEntryType status
              , statFileMode         = fileMode status
              , statLinkCount        = linkCount status
              , statFileOwner        = fileOwner status
              , statFileGroup        = fileGroup status
              , statSpecialDeviceID  = specialDeviceID status
-             , statFileSize         = fileSize status + size'
+             , statFileSize         = size
              -- fixme: 1024 is not always the size of a block
-             , statBlocks           = fromIntegral ((fileSize status + size') `div` 1024)
+             , statBlocks           = fromIntegral size `div` 1024
              , statAccessTime       = accessTime status
              , statModificationTime = modificationTime status
              , statStatusChangeTime = statusChangeTime status
              }
+
+calcFileSize :: Config -> FilePath -> IO FileOffset
+calcFileSize cfg path =
+  do let paths = asPrimary path cfg
+     size' <- fmap (sum . map fileSize) $ mapM getSymbolicLinkStatus paths
+     return $ size' - (fromIntegral (length paths) * metadataSize)
 
 hecsGetFileStat :: Config -> FilePath -> IO (Either Errno FileStat)
 hecsGetFileStat cfg path =
   -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   do let paths = asPrimary path cfg
      status <- getSymbolicLinkStatus . head $ paths
-     size' <- fmap (sum . map fileSize) $ mapM getSymbolicLinkStatus (tail paths)
-     return $ Right $ fileStatusToFileStat status size'
+     size <- calcFileSize cfg path
+     return $ Right $ fileStatusToFileStat status size
 
 hecsCreateDirectory :: Config -> FilePath -> FileMode -> IO Errno
 hecsCreateDirectory cfg path mode =
@@ -181,11 +221,13 @@ hecsCreateDevice cfg path0 entryType mode dev =
        return eOK
 
 hecsOpen :: Config -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
+hecsOpen cfg path0 ReadOnly flags =
+  do ps <- mapM (\path -> openFd path ReadOnly Nothing flags) (asPrimary path0 cfg)
+     return . Right $ HECS (V.fromList ps) V.empty
+
 hecsOpen cfg path0 mode flags =
-  -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   do ps <- mapM (\path -> openFd path ReadWrite Nothing flags) (asPrimary path0 cfg)
-     ss <- mapM (\path -> openFd path ReadWrite Nothing flags) (asSecondary path0 cfg)
-     print (ps, ss)
+     ss <- mapM (\path -> openFd path mode Nothing flags) (asSecondary path0 cfg)
      return . Right $ HECS (V.fromList ps) (V.fromList ss)
 
 quotRem' :: (Integral a, Integral a1, Num t, Num t1) => a -> a1 -> (t, t1)
@@ -218,7 +260,7 @@ hecsRead _ _ (HECS prims _) count off =
 
 readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
 readChunk (fd, goff, len) =
-  do _ <- fdSeek fd AbsoluteSeek goff
+  do _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
      B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
@@ -233,8 +275,7 @@ hecsWrite _ _ hecs@(HECS prims _) src off =
 
 writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
 writeChunk (fd, goff, B.PS fptr soff len) = do
-  print (fd, len)
-  _ <- fdSeek fd AbsoluteSeek goff
+  _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
   withForeignPtr fptr $ \ptr -> fdWriteBuf fd (ptr `plusPtr` soff) (fromIntegral len)
 
 readStripe :: StripeIndex -> V.Vector Fd -> IO (V.Vector B.ByteString)
@@ -293,7 +334,9 @@ splitSize k k' sz =
       go n (x:xs) | n > defaultChunkSize = (x + defaultChunkSize) : go (n - defaultChunkSize) xs
                   | otherwise = (x + n) : xs
       go _ [] = []
-  in go r (replicate k (q * defaultChunkSize)) <> replicate k' ((q + 1) * defaultChunkSize)
+  in map (+metadataSize) $
+       go r (replicate k (q * defaultChunkSize))
+       <> replicate k' ((q + 1) * defaultChunkSize)
 
 hecsSetFileSize :: Config -> FilePath -> FileOffset -> IO Errno
 hecsSetFileSize cfg path0 off =
