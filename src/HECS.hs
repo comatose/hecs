@@ -32,7 +32,7 @@ import qualified Text.JSON.Generic        as J
 defaultChunkSize :: (Integral a) => a
 defaultChunkSize = 4
 
-data Config = Config{ primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
+data Config = Config { primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
 
 data HECS = HECS (V.Vector Fd) (V.Vector Fd)
 
@@ -57,6 +57,17 @@ instance Storable Metadata where
 metadataSize :: (Integral a) => a
 metadataSize = fromIntegral . sizeOf $ (undefined :: Metadata)
 
+readFileSize :: Fd -> IO FileOffset
+readFileSize fd =
+  do _ <- fdSeek fd AbsoluteSeek 0
+     with 0 $ \ptr -> fdReadBuf fd (castPtr ptr) (fromIntegral $ sizeOf (undefined :: FileOffset)) >> peek ptr
+
+writeFileSize :: FileOffset -> Fd -> IO ()
+writeFileSize size fd =
+  do _ <- fdSeek fd AbsoluteSeek 0
+     with size $ \ptr -> poke ptr size >> fdWriteBuf fd (castPtr ptr) (fromIntegral $ sizeOf size)
+     return ()
+
 readMetadata :: Fd -> IO Metadata
 readMetadata fd =
   do _ <- fdSeek fd AbsoluteSeek 0
@@ -66,7 +77,7 @@ readMetadata fd =
 writeMetadata :: Metadata -> Fd -> IO ()
 writeMetadata md fd =
   do _ <- fdSeek fd AbsoluteSeek 0
-     with md $ \ptr -> fdWriteBuf fd (castPtr ptr) metadataSize
+     with md $ \ptr -> poke ptr md >> fdWriteBuf fd (castPtr ptr) metadataSize
      return ()
 
 asPrimary :: String -> Config -> [String]
@@ -214,11 +225,18 @@ hecsSetFileTimes cfg path0 at mt =
        return eOK
 
 hecsCreateDevice :: Config -> FilePath -> EntryType -> FileMode -> DeviceID -> IO Errno
-hecsCreateDevice cfg path0 entryType mode dev =
-    do let combinedMode = entryTypeToFileMode entryType `unionFileModes` mode
-           paths = asPrimary path0 cfg ++ asSecondary path0 cfg
-       mapM_ (\path -> createDevice path combinedMode dev) paths
-       return eOK
+hecsCreateDevice cfg path0 entryType mode dev
+  = case entryType of
+    Directory -> makeDevices >> return eOK
+    RegularFile -> makeDevices >> initMetadata >> return eOK
+    _ -> return eNOSYS
+  where
+    combinedMode = entryTypeToFileMode entryType `unionFileModes` mode
+    paths = asPrimary path0 cfg ++ asSecondary path0 cfg
+    makeDevices = mapM_ (\path -> createDevice path combinedMode dev) paths
+    initMetadata = zipWithM_
+                   (\f i -> withFile f WriteMode $ handleToFd >=> writeMetadata (0, i))
+                   paths [0..]
 
 hecsOpen :: Config -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
 hecsOpen cfg path0 ReadOnly flags =
@@ -255,7 +273,6 @@ toPhyChunks _ _ = []
 
 hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
 hecsRead _ _ (HECS prims _) count off =
-  -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   fmap (Right . B.concat) (mapM readChunk . toPhyAddrs prims off . fromIntegral $ count )
 
 readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
@@ -265,10 +282,12 @@ readChunk (fd, goff, len) =
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
 hecsWrite _ _ hecs@(HECS prims _) src off =
-  -- handle (\(_ :: SomeException) -> fmap Left getErrno) $
   do
     n0 <- fmap sum (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . fromIntegral . B.length $ src)
     mapM_ (`completeStripe` hecs) [start..(end n0)]
+    let newSize = fromIntegral n0 + off
+    size <- readFileSize $ V.head prims
+    when (newSize > size) $ V.forM_ prims (writeFileSize newSize)
     return . Right $ n0
       where start = fromIntegral off `quot` (V.length prims * defaultChunkSize)
             end n = (fromIntegral off + fromIntegral n - 1) `quot` (V.length prims * defaultChunkSize)
