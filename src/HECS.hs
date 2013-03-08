@@ -281,13 +281,14 @@ readChunk (fd, goff, len) =
      B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
-hecsWrite _ _ hecs@(HECS prims _) src off =
+hecsWrite _ _ hecs@(HECS prims secos) src off =
   do
     n0 <- fmap sum (mapM writeChunk . toPhyChunks src . toPhyAddrs prims off . fromIntegral . B.length $ src)
     mapM_ (`completeStripe` hecs) [start..(end n0)]
     let newSize = fromIntegral n0 + off
-    size <- readFileSize $ V.head prims
-    when (newSize > size) $ V.forM_ prims (writeFileSize newSize)
+    size <- readFileSize (V.head prims)
+    print (size, newSize)
+    when (newSize > size) $ V.forM_ (prims <> secos) (writeFileSize newSize)
     return . Right $ n0
       where start = fromIntegral off `quot` (V.length prims * defaultChunkSize)
             end n = (fromIntegral off + fromIntegral n - 1) `quot` (V.length prims * defaultChunkSize)
@@ -358,11 +359,14 @@ splitSize k k' sz =
        <> replicate k' ((q + 1) * defaultChunkSize)
 
 hecsSetFileSize :: Config -> FilePath -> FileOffset -> IO Errno
-hecsSetFileSize cfg path0 off =
+hecsSetFileSize cfg path0 newSize =
     do let prims = asPrimary path0 cfg
            secos = asSecondary path0 cfg
        zipWithM_ setFileSize (prims <> secos)
-         (splitSize (length prims) (length secos) off)
+         (splitSize (length prims) (length secos) newSize)
+       forM_ (prims <> secos) $ \f ->
+         bracket (openFd f WriteOnly Nothing defaultFileFlags) closeFd
+         (writeFileSize newSize)
        return eOK
 
 -- hecsCreateSymbolicLink :: Config -> FilePath -> FilePath -> IO Errno
