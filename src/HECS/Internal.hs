@@ -142,30 +142,31 @@ toPhyAddrs fds off0 len0 = go (quotRem' off0 defaultChunkSize) (fromIntegral len
       let (q, nodeNo) = chunkNo `quotRem` V.length fds
       in (fds V.! nodeNo, fromIntegral q * defaultChunkSize + off, bc)
 
-toPhyChunks :: B.ByteString -> [(Fd, FileOffset, ByteCount)] -> [(Fd, FileOffset, B.ByteString)]
-toPhyChunks buf ((fd, off, len):rest)
-  | B.null buf = []
-  | otherwise = let (chunk, buf') = B.splitAt (fromIntegral len) buf
-                in (fd, off, chunk) : toPhyChunks buf' rest
-toPhyChunks _ _ = []
+toPhyChunks :: V.Vector Fd -> FileOffset -> B.ByteString -> [(Fd, FileOffset, B.ByteString)]
+toPhyChunks fds off0 src = slice src $ toPhyAddrs fds off0 (fromIntegral . B.length $ src)
+  where slice buf ((fd, off, len):rest)
+          | B.null buf = []
+          | otherwise = let (chunk, buf') = B.splitAt (fromIntegral len) buf
+                        in (fd, off, chunk) : slice buf' rest
+        slice _ _ = []
 
-readChunk :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
-readChunk (fd, goff, len) =
+fdReadBS :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
+fdReadBS (fd, goff, len) =
   do _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
      B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
 
-writeChunk :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
-writeChunk (fd, goff, B.PS fptr soff len) = do
+fdWriteBS :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
+fdWriteBS (fd, goff, B.PS fptr soff len) = do
   _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
   withForeignPtr fptr $ \ptr -> fdWriteBuf fd (ptr `plusPtr` soff) (fromIntegral len)
 
 readStripe :: StripeIndex -> V.Vector Fd -> IO (V.Vector B.ByteString)
 readStripe si =
-  V.mapM (\fd -> readChunk (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
+  V.mapM (\fd -> fdReadBS (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
 
 writeStripe :: StripeIndex -> V.Vector Fd -> V.Vector B.ByteString -> IO (V.Vector ByteCount)
 writeStripe si =
-  V.zipWithM (\fd buf -> writeChunk (fd, fromIntegral si * defaultChunkSize, buf))
+  V.zipWithM (\fd buf -> fdWriteBS (fd, fromIntegral si * defaultChunkSize, buf))
 
 padZero :: [B.ByteString] -> [B.ByteString]
 padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)

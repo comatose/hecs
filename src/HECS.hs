@@ -135,29 +135,29 @@ hecsOpen cfg path mode flags =
      return . Right $ HECS (V.fromList ps) (V.fromList ss)
 
 hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
-hecsRead _ _ (HECS primes _) count off =
-  fmap (Right . B.concat) (mapM readChunk . toPhyAddrs primes off . fromIntegral $ count )
+hecsRead _ _ (HECS primes _) count offset = do
+  bs <- mapM fdReadBS chunks
+  return . Right . B.concat $ bs
+  where chunks :: [(Fd, FileOffset, ByteCount)]
+        chunks = toPhyAddrs primes offset (fromIntegral count)
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
-hecsWrite _ _ hecs@(HECS primes spares) src off =
-  do
-    n0 <- fmap sum (mapM writeChunk . toPhyChunks src . toPhyAddrs primes off . fromIntegral . B.length $ src)
-    mapM_ (`completeStripe` hecs) [start..(end n0)]
-    let newSize = fromIntegral n0 + off
-    size <- readFileSize (V.head primes)
-    print (size, newSize)
-    when (newSize > size) $ V.forM_ (primes <> spares) (writeFileSize newSize)
-    return . Right $ n0
-      where start = fromIntegral off `quot` (V.length primes * defaultChunkSize)
-            end n = (fromIntegral off + fromIntegral n - 1) `quot` (V.length primes * defaultChunkSize)
+hecsWrite _ _ hecs@(HECS primes spares) src offset = do
+  len <- fmap sum $ mapM fdWriteBS (toPhyChunks primes offset src)
+  mapM_ (`completeStripe` hecs) [start..(end len)]
+  let newSize = offset + fromIntegral len
+  size <- readFileSize (V.head primes)
+  when (newSize > size) $ V.forM_ (primes <> spares) (writeFileSize newSize)
+  return . Right $ len
+    where stripeSize = V.length primes * defaultChunkSize
+          start = fromIntegral offset `quot` stripeSize
+          end n = (fromIntegral offset + fromIntegral n - 1) `quot` stripeSize
 
 hecsFlush :: Config -> FilePath -> HT -> IO Errno
 hecsFlush _ _ _ = return eOK
 
 hecsRelease :: Config -> FilePath -> HT -> IO ()
-hecsRelease _ _ (HECS primes spares) = do
-  V.mapM_ closeFd primes
-  V.mapM_ closeFd spares
+hecsRelease _ _ (HECS primes spares) = V.mapM_ closeFd (primes <> spares)
 
 hecsSynchronizeFile :: Config -> FilePath -> SyncType -> IO Errno
 hecsSynchronizeFile _ _ _ = return eOK
