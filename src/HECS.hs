@@ -8,7 +8,7 @@ module Main where
 
 import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import           Codec.Utils              (listFromOctets, listToOctets)
-import           Control.Exception        (assert)
+import           Control.Concurrent.MVar  (MVar, newMVar, withMVar)
 import           Control.Monad
 import qualified Data.ByteString          as B
 import           Data.Either
@@ -22,6 +22,8 @@ import           System.Directory         (getDirectoryContents)
 import           System.Fuse
 import           System.IO
 import           System.Posix
+
+data HECS = HECS (V.Vector Fd) (V.Vector Fd) (MVar ())
 
 type HT = HECS
 
@@ -128,37 +130,41 @@ hecsCreateDevice cfg path entryType mode dev
 hecsOpen :: Config -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
 hecsOpen cfg path ReadOnly flags =
   do primes <- mapM (\p -> openFd p ReadOnly Nothing flags) (primeFiles path cfg)
-     return . Right $ HECS (V.fromList primes) V.empty
+     lock <- newMVar ()
+     return . Right $ HECS (V.fromList primes) V.empty lock
 
 hecsOpen cfg path mode flags =
   do primes <- mapM (\p -> openFd p ReadWrite Nothing flags) (primeFiles path cfg)
      spares <- mapM (\p -> openFd p mode Nothing flags) (spareFiles path cfg)
-     return . Right $ HECS (V.fromList primes) (V.fromList spares)
+     lock <- newMVar ()
+     return . Right $ HECS (V.fromList primes) (V.fromList spares) lock
 
 hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
-hecsRead _ _ (HECS primes _) count offset = do
-  bs <- mapM fdReadBS chunks
-  return . Right . B.concat $ bs
-  where chunks :: [(Fd, FileOffset, ByteCount)]
-        chunks = toPhyAddrs primes offset (fromIntegral count)
+hecsRead _ _ (HECS primes _ lock) count offset =
+  withMVar lock . const $ do
+    bs <- mapM fdReadBS chunks
+    return . Right . B.concat $ bs
+      where chunks :: [(Fd, FileOffset, ByteCount)]
+            chunks = toPhyAddrs primes offset (fromIntegral count)
 
 hecsWrite :: Config -> FilePath -> HT -> B.ByteString -> FileOffset -> IO (Either Errno ByteCount)
-hecsWrite _ _ hecs@(HECS primes spares) src offset = do
-  len <- fmap sum $ mapM fdWriteBS (toPhyChunks primes offset src)
-  mapM_ (`completeStripe` hecs) [start..(end len)]
-  let newSize = offset + fromIntegral len
-  size <- readFileSize (V.head primes)
-  when (newSize > size) $ V.forM_ (primes <> spares) (writeFileSize newSize)
-  return . Right $ len
-    where stripeSize = V.length primes * defaultChunkSize
-          start = fromIntegral offset `quot` stripeSize
-          end n = (fromIntegral offset + fromIntegral n - 1) `quot` stripeSize
+hecsWrite _ _ (HECS primes spares lock) src offset =
+  withMVar lock . const $ do
+    len <- fmap sum $ mapM fdWriteBS (toPhyChunks primes offset src)
+    mapM_ (\si -> completeStripe si primes spares) [start..(end len)]
+    let newSize = offset + fromIntegral len
+    size <- readFileSize (V.head primes)
+    when (newSize > size) $ V.forM_ (primes <> spares) (writeFileSize newSize)
+    return . Right $ len
+      where stripeSize = V.length primes * defaultChunkSize
+            start = fromIntegral offset `quot` stripeSize
+            end n = (fromIntegral offset + fromIntegral n - 1) `quot` stripeSize
 
 hecsFlush :: Config -> FilePath -> HT -> IO Errno
 hecsFlush _ _ _ = return eOK
 
 hecsRelease :: Config -> FilePath -> HT -> IO ()
-hecsRelease _ _ (HECS primes spares) = V.mapM_ closeFd (primes <> spares)
+hecsRelease _ _ (HECS primes spares _) = V.mapM_ closeFd (primes <> spares)
 
 hecsSynchronizeFile :: Config -> FilePath -> SyncType -> IO Errno
 hecsSynchronizeFile _ _ _ = return eOK

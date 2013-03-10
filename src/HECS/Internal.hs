@@ -31,8 +31,6 @@ defaultChunkSize = 4 * 1024
 
 data Config = Config { primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
 
-data HECS = HECS (V.Vector Fd) (V.Vector Fd)
-
 type ChunkIndex = Int
 
 type StripeIndex = Int
@@ -171,14 +169,14 @@ writeStripe si =
 padZero :: [B.ByteString] -> [B.ByteString]
 padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)
 
-completeStripe :: StripeIndex -> HECS -> IO ()
-completeStripe si (HECS prims secos) = do
-  _ <- readStripe si prims >>=
-       return. F.encode (F.fec k n) . padZero . V.toList >>=
-       writeStripe si secos . V.fromList
+completeStripe :: StripeIndex -> V.Vector Fd -> V.Vector Fd -> IO ()
+completeStripe si primes spares = do
+  _ <- readStripe si primes >>=
+       return . F.encode (F.fec k n) . padZero . V.toList >>=
+       writeStripe si spares . V.fromList
   return ()
-    where k = V.length prims
-          n = k + V.length secos
+    where k = V.length primes
+          n = k + V.length spares
 
 splitSize :: Int -> Int -> FileOffset -> [FileOffset]
 splitSize k k' sz =
