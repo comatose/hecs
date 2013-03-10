@@ -6,9 +6,9 @@
 
 module Main where
 
-import Control.Exception (assert)
 import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import           Codec.Utils              (listFromOctets, listToOctets)
+import           Control.Exception        (assert)
 import           Control.Monad
 import qualified Data.ByteString          as B
 import           Data.Either
@@ -137,9 +137,8 @@ hecsOpen cfg path mode flags =
 
 hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
 hecsRead _ _ (HECS primes _) count offset = do
-  bs <- fmap B.concat $ mapM fdReadBS chunks
-  when (B.length bs /= fromIntegral count) $ print ("!!!!!!!!!!!!!!!!!!!!!!!!!!" ++ show (B.length bs, count))
-  return . Right $ bs
+  bs <- mapM fdReadBS chunks
+  return . Right . B.concat $ bs
   where chunks :: [(Fd, FileOffset, ByteCount)]
         chunks = toPhyAddrs primes offset (fromIntegral count)
 
