@@ -6,6 +6,7 @@
 
 module Main where
 
+import Control.Exception (assert)
 import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import           Codec.Utils              (listFromOctets, listToOctets)
 import           Control.Monad
@@ -126,18 +127,19 @@ hecsCreateDevice cfg path entryType mode dev
 
 hecsOpen :: Config -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
 hecsOpen cfg path ReadOnly flags =
-  do ps <- mapM (\p -> openFd p ReadOnly Nothing flags) (primeFiles path cfg)
-     return . Right $ HECS (V.fromList ps) V.empty
+  do primes <- mapM (\p -> openFd p ReadOnly Nothing flags) (primeFiles path cfg)
+     return . Right $ HECS (V.fromList primes) V.empty
 
 hecsOpen cfg path mode flags =
-  do ps <- mapM (\p -> openFd p ReadWrite Nothing flags) (primeFiles path cfg)
-     ss <- mapM (\p -> openFd p mode Nothing flags) (spareFiles path cfg)
-     return . Right $ HECS (V.fromList ps) (V.fromList ss)
+  do primes <- mapM (\p -> openFd p ReadWrite Nothing flags) (primeFiles path cfg)
+     spares <- mapM (\p -> openFd p mode Nothing flags) (spareFiles path cfg)
+     return . Right $ HECS (V.fromList primes) (V.fromList spares)
 
 hecsRead :: Config -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
 hecsRead _ _ (HECS primes _) count offset = do
-  bs <- mapM fdReadBS chunks
-  return . Right . B.concat $ bs
+  bs <- fmap B.concat $ mapM fdReadBS chunks
+  when (B.length bs /= fromIntegral count) $ print ("!!!!!!!!!!!!!!!!!!!!!!!!!!" ++ show (B.length bs, count))
+  return . Right $ bs
   where chunks :: [(Fd, FileOffset, ByteCount)]
         chunks = toPhyAddrs primes offset (fromIntegral count)
 

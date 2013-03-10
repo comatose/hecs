@@ -27,7 +27,7 @@ import           System.Posix
 import qualified Text.JSON.Generic        as J
 
 defaultChunkSize :: (Integral a) => a
-defaultChunkSize = 4
+defaultChunkSize = 4 * 1024
 
 data Config = Config { primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
 
