@@ -9,7 +9,7 @@ license-file: LICENSE
 version: 0.1
 build-type:Simple
 category: Filesystem
-executable HECS
+executable hecs
   main-is:             
     HECS.hs
   -- other-modules:       
@@ -20,10 +20,31 @@ executable HECS
     , haskeline
     , json
     , Crypto
-    , array
     , unix
     , HFuse
     , directory
+    , vector
+    , io-streams
+  ghc-options:
+    -Wall
+  hs-source-dirs:
+    src
+executable hecsutil
+  main-is:             
+    HECSUtil.hs
+  -- other-modules:       
+  build-depends:
+    base >= 3 && < 5
+    , fec >= 0.1
+    , bytestring
+    , haskeline
+    , json
+    , Crypto
+    , unix
+    , HFuse
+    , directory
+    , vector
+    , io-streams
   ghc-options:
     -Wall
   hs-source-dirs:

@@ -13,6 +13,7 @@ import           Control.Monad
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B
 import           Data.Either
+import           Data.Function            (on)
 import           Data.Monoid              ((<>))
 import qualified Data.Vector              as V
 import           Data.Word
@@ -23,6 +24,8 @@ import           Foreign.Storable
 import           Prelude                  hiding (catch)
 import           System.Fuse
 import           System.IO
+import qualified System.IO.Streams        as S
+import qualified System.IO.Streams.Handle as S
 import           System.Posix
 import qualified Text.JSON.Generic        as J
 
@@ -149,22 +152,24 @@ toPhyChunks fds off0 src = slice src $ toPhyAddrs fds off0 (fromIntegral . B.len
         slice _ _ = []
 
 fdReadBS :: (Fd, FileOffset, ByteCount) -> IO B.ByteString
-fdReadBS (fd, goff, len) =
-  do _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
-     B.createAndTrim (fromIntegral len) (\ptr -> fmap fromIntegral (fdReadBuf fd ptr len))
+fdReadBS (fd, goff, len) = fdSeek fd AbsoluteSeek (goff + metadataSize) >> fdReadBS_ fd len
+
+fdReadBS_ :: Fd -> ByteCount -> IO B.ByteString
+fdReadBS_ fd len = B.createAndTrim (fromIntegral len)
+                   (\ptr -> fmap fromIntegral $ fdReadBuf fd ptr len)
 
 fdWriteBS :: (Fd, FileOffset, B.ByteString) -> IO ByteCount
-fdWriteBS (fd, goff, B.PS fptr soff len) = do
-  _ <- fdSeek fd AbsoluteSeek (goff + metadataSize)
-  withForeignPtr fptr $ \ptr -> fdWriteBuf fd (ptr `plusPtr` soff) (fromIntegral len)
+fdWriteBS (fd, goff, bs) = fdSeek fd AbsoluteSeek (goff + metadataSize) >> fdWriteBS_ fd bs
+
+fdWriteBS_ :: Fd -> B.ByteString -> IO ByteCount
+fdWriteBS_ fd (B.PS fptr soff len) = withForeignPtr fptr $ \ptr ->
+  fdWriteBuf fd (ptr `plusPtr` soff) (fromIntegral len)
 
 readStripe :: StripeIndex -> V.Vector Fd -> IO (V.Vector B.ByteString)
-readStripe si =
-  V.mapM (\fd -> fdReadBS (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
+readStripe si = V.mapM (\fd -> fdReadBS (fd, fromIntegral si * defaultChunkSize, defaultChunkSize))
 
 writeStripe :: StripeIndex -> V.Vector Fd -> V.Vector B.ByteString -> IO (V.Vector ByteCount)
-writeStripe si =
-  V.zipWithM (\fd buf -> fdWriteBS (fd, fromIntegral si * defaultChunkSize, buf))
+writeStripe si = V.zipWithM (\fd buf -> fdWriteBS (fd, fromIntegral si * defaultChunkSize, buf))
 
 padZero :: [B.ByteString] -> [B.ByteString]
 padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)
@@ -187,3 +192,18 @@ splitSize k k' sz =
   in map (+metadataSize) $
        go r (replicate k (q * defaultChunkSize))
        <> replicate k' ((q + 1) * defaultChunkSize)
+
+repair :: Int -> Int -> [Fd] -> Fd -> IO ()
+repair k n src trg = do
+  md <- mapM readMetadata src    -- also, shifting offset as a side-effect
+  guard $ and $ zipWith ((==) `on` fst) md (tail md)
+  let len = fst $ head md
+  is <- S.makeInputStream . fmap (decode md) . forM src $ (`fdReadBS_` defaultChunkSize)
+  os <- S.makeOutputStream $ fmap (const ()) . maybe (return 0) (fdWriteBS_ trg)
+  S.takeBytes (fromIntegral len) is >>= S.connectTo os
+  where
+    decode :: [Metadata] -> [B.ByteString] -> Maybe B.ByteString
+    decode md bs = if any B.null bs
+                   then Nothing
+                   else Just . B.concat . F.decode (F.fec k n)
+                        $ zip (map (fromIntegral . snd) md) (padZero bs)
