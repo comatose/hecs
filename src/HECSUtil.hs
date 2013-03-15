@@ -1,12 +1,12 @@
 
 module Main where
 
-import           Control.Exception        (try)
-import           Control.Monad            (forM, guard)
+import           Control.Exception
+import           Control.Monad
 import           Data.Either
 import           HECS.Internal
-import           Prelude                  hiding (catch)
-import           System.Console.Haskeline hiding (handle)
+import           Prelude            hiding (catch)
+-- import           System.Console.Haskeline hiding (handle)
 import           System.Environment
 import           System.Posix
 

@@ -6,19 +6,20 @@
 
 module Main where
 
-import           Codec.Encryption.Padding (pkcs5, unPkcs5)
-import           Codec.Utils              (listFromOctets, listToOctets)
-import           Control.Concurrent.MVar  (MVar, newMVar, withMVar)
+-- import           Codec.Encryption.Padding (pkcs5, unPkcs5)
+-- import           Codec.Utils              (listFromOctets, listToOctets)
+import           Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import           Control.Exception
 import           Control.Monad
-import qualified Data.ByteString          as B
+import qualified Data.ByteString         as B
 import           Data.Either
-import           Data.Monoid              ((<>))
-import qualified Data.Vector              as V
+import           Data.Monoid             ((<>))
+import qualified Data.Vector             as V
 import           Foreign.C.Error
 import           HECS.Internal
-import           Prelude                  hiding (catch)
-import           System.Console.Haskeline hiding (handle)
-import           System.Directory         (getDirectoryContents)
+import           Prelude                 hiding (catch)
+-- import           System.Console.Haskeline hiding (handle)
+import           System.Directory        (getDirectoryContents)
 import           System.Fuse
 import           System.IO
 import           System.Posix
@@ -69,9 +70,9 @@ hecsFSOps cfg =
 
 hecsGetFileStat :: Config -> FilePath -> IO (Either Errno FileStat)
 hecsGetFileStat cfg path =
-  do status <- getSymbolicLinkStatus . head $ primeFiles path cfg
-     size <- calcFileSize cfg path
-     return $ Right $ fileStatusToFileStat status size
+  do status <- mapM getSymbolicLinkStatus $ entireFiles path cfg
+     size <- calcFileSize cfg status
+     return $ Right $ fileStatusToFileStat (head status) size
 
 hecsCreateDirectory :: Config -> FilePath -> FileMode -> IO Errno
 hecsCreateDirectory cfg path mode =

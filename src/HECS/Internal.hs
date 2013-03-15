@@ -1,3 +1,6 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 {-# LANGUAGE DeriveDataTypeable        #-}
 {-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
@@ -6,9 +9,9 @@
 
 module HECS.Internal where
 
-import           Codec.Encryption.Padding (pkcs5, unPkcs5)
+-- import           Codec.Encryption.Padding (pkcs5, unPkcs5)
 import qualified Codec.FEC                as F
-import           Codec.Utils              (listFromOctets, listToOctets)
+-- import           Codec.Utils              (listFromOctets, listToOctets)
 import           Control.Monad
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B
@@ -25,7 +28,6 @@ import           Prelude                  hiding (catch)
 import           System.Fuse
 import           System.IO
 import qualified System.IO.Streams        as S
-import qualified System.IO.Streams.Handle as S
 import           System.Posix
 import qualified Text.JSON.Generic        as J
 
@@ -56,34 +58,33 @@ metadataSize = fromIntegral . sizeOf $ (undefined :: Metadata)
 
 readFileSize :: Fd -> IO FileOffset
 readFileSize fd =
-  do _ <- fdSeek fd AbsoluteSeek 0
-     with 0 $ \ptr -> fdReadBuf fd (castPtr ptr) (fromIntegral $ sizeOf (undefined :: FileOffset)) >> peek ptr
+  do fdSeek fd AbsoluteSeek 0
+     with 0 $ \ptr ->
+       fdReadBuf fd (castPtr ptr) (fromIntegral $ sizeOf (undefined :: FileOffset)) >> peek ptr
 
 writeFileSize :: FileOffset -> Fd -> IO ()
 writeFileSize size fd =
-  do _ <- fdSeek fd AbsoluteSeek 0
-     _ <- with size $ \ptr -> poke ptr size >> fdWriteBuf fd (castPtr ptr) (fromIntegral $ sizeOf size)
-     return ()
+  do fdSeek fd AbsoluteSeek 0
+     void . with size $ \ptr ->
+       poke ptr size >> fdWriteBuf fd (castPtr ptr) (fromIntegral $ sizeOf size)
 
 readMetadata :: Fd -> IO Metadata
 readMetadata fd =
-  do _ <- fdSeek fd AbsoluteSeek 0
-     let md = (0, 0) :: Metadata
-     with md $ \ptr -> fdReadBuf fd (castPtr ptr) metadataSize >> peek ptr
+  do fdSeek fd AbsoluteSeek 0
+     with ((0, 0) :: Metadata) $ \ptr ->
+       fdReadBuf fd (castPtr ptr) metadataSize >> peek ptr
 
 writeMetadata :: Metadata -> Fd -> IO ()
 writeMetadata md fd =
-  do _ <- fdSeek fd AbsoluteSeek 0
-     _ <- with md $ \ptr -> poke ptr md >> fdWriteBuf fd (castPtr ptr) metadataSize
-     return ()
+  do fdSeek fd AbsoluteSeek 0
+     void . with md $ \ptr ->
+       poke ptr md >> fdWriteBuf fd (castPtr ptr) metadataSize
 
 primeFiles :: String -> Config -> [String]
 primeFiles path cfg = map (++ path) (primaryNodes cfg)
--- primeFiles ('/':path) cfg = map (FP.encodeString . (</> (FP.decodeString path)) . FP.decodeString) (primaryNodes cfg)
 
 spareFiles :: String -> Config -> [String]
 spareFiles path cfg = map (++ path) (secondaryNodes cfg)
--- spareFiles ('/':path) cfg = map (FP.encodeString . (</> (FP.decodeString path)) . FP.decodeString) (secondaryNodes cfg)
 
 entireFiles :: String -> Config -> [String]
 entireFiles path cfg = primeFiles path cfg ++ spareFiles path cfg
@@ -121,11 +122,11 @@ fileStatusToFileStat status size =
              , statStatusChangeTime = statusChangeTime status
              }
 
-calcFileSize :: Config -> FilePath -> IO FileOffset
-calcFileSize cfg path =
-  do let paths = primeFiles path cfg
-     size' <- fmap (sum . map fileSize) $ mapM getSymbolicLinkStatus paths
-     return $ size' - (fromIntegral (length paths) * metadataSize)
+calcFileSize :: Config -> [FileStatus] -> IO FileOffset
+calcFileSize cfg stats =
+  do let k = length . primaryNodes $ cfg
+         size' = sum . map fileSize . take k $ stats
+     return $ size' - (fromIntegral k * metadataSize)
 
 quotRem' :: (Integral a, Integral a1, Num t, Num t1) => a -> a1 -> (t, t1)
 quotRem' x y = let (q, r) = quotRem (fromIntegral x) (fromIntegral y) in (fromIntegral q, fromIntegral r)
@@ -175,13 +176,12 @@ padZero :: [B.ByteString] -> [B.ByteString]
 padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)
 
 completeStripe :: StripeIndex -> V.Vector Fd -> V.Vector Fd -> IO ()
-completeStripe si primes spares = do
-  _ <- readStripe si primes >>=
-       return . F.encode (F.fec k n) . padZero . V.toList >>=
-       writeStripe si spares . V.fromList
-  return ()
-    where k = V.length primes
-          n = k + V.length spares
+completeStripe si primes spares = void $
+  let k = V.length primes
+      n = k + V.length spares
+  in readStripe si primes >>=
+     return . F.encode (F.fec k n) . padZero . V.toList >>=
+     writeStripe si spares . V.fromList
 
 splitSize :: Int -> Int -> FileOffset -> [FileOffset]
 splitSize k k' sz =
@@ -199,7 +199,7 @@ repair k n src trg = do
   guard $ and $ zipWith ((==) `on` fst) md (tail md)
   let len = fst $ head md
   is <- S.makeInputStream . fmap (decode md) . forM src $ (`fdReadBS_` defaultChunkSize)
-  os <- S.makeOutputStream $ fmap (const ()) . maybe (return 0) (fdWriteBS_ trg)
+  os <- S.makeOutputStream $ void . maybe (return 0) (fdWriteBS_ trg)
   S.takeBytes (fromIntegral len) is >>= S.connectTo os
   where
     decode :: [Metadata] -> [B.ByteString] -> Maybe B.ByteString
