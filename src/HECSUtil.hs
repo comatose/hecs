@@ -19,5 +19,5 @@ main = do
     then bracket
          (openFd f WriteOnly Nothing defaultFileFlags)
          (\trg -> closeFd trg >> mapM_ closeFd src)
-         (\trg -> repair (length src) (read n) src trg)
+         (\trg -> recover (length src) (read n) src trg)
     else mapM_ closeFd src

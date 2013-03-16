@@ -70,8 +70,9 @@ hecsFSOps cfg =
 
 hecsGetFileStat :: Config -> FilePath -> IO (Either Errno FileStat)
 hecsGetFileStat cfg path =
-  do status <- mapM getSymbolicLinkStatus $ entireFiles path cfg
-     size <- calcFileSize cfg status
+  do let k = length . primaryNodes $ cfg
+     status <- mapM getSymbolicLinkStatus $ entireFiles path cfg
+     size <- calcFileSize . take k $ status
      return $ Right $ fileStatusToFileStat (head status) size
 
 hecsCreateDirectory :: Config -> FilePath -> FileMode -> IO Errno

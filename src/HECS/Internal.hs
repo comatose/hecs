@@ -31,16 +31,20 @@ import qualified System.IO.Streams        as S
 import           System.Posix
 import qualified Text.JSON.Generic        as J
 
+-- | 4 kB
 defaultChunkSize :: (Integral a) => a
 defaultChunkSize = 4 * 1024
 
-data Config = Config { primaryNodes :: [FilePath], secondaryNodes :: [FilePath] } deriving (J.Typeable, J.Data, Show)
+data Config = Config {
+  primaryNodes     :: [FilePath] -- ^ where primary files are stored, should be absolute.
+  , secondaryNodes :: [FilePath] -- ^ where redundant files are stored, should be absolute.
+  } deriving (J.Typeable, J.Data, Show)
 
 type ChunkIndex = Int
 
 type StripeIndex = Int
 
-type Metadata = (FileOffset, Word8)  -- (file size, id)
+type Metadata = (FileOffset, Word8)  -- ^ (file size, node id)
 
 instance Storable Metadata where
   sizeOf _ = sizeOf (undefined :: FileOffset) + sizeOf (undefined :: Word8)
@@ -53,39 +57,49 @@ instance Storable Metadata where
     poke (castPtr p) off
     poke (p `plusPtr` sizeOf off) nid
 
+-- | payload of metadata per file
 metadataSize :: (Integral a) => a
 metadataSize = fromIntegral . sizeOf $ (undefined :: Metadata)
 
+-- | read the size fo the file from its metadata
 readFileSize :: Fd -> IO FileOffset
 readFileSize fd =
   do fdSeek fd AbsoluteSeek 0
      with 0 $ \ptr ->
        fdReadBuf fd (castPtr ptr) (fromIntegral $ sizeOf (undefined :: FileOffset)) >> peek ptr
 
+-- | record the size of the file as metadata
 writeFileSize :: FileOffset -> Fd -> IO ()
 writeFileSize size fd =
   do fdSeek fd AbsoluteSeek 0
      void . with size $ \ptr ->
        poke ptr size >> fdWriteBuf fd (castPtr ptr) (fromIntegral $ sizeOf size)
 
+-- | read the whole metadata
 readMetadata :: Fd -> IO Metadata
 readMetadata fd =
   do fdSeek fd AbsoluteSeek 0
      with ((0, 0) :: Metadata) $ \ptr ->
        fdReadBuf fd (castPtr ptr) metadataSize >> peek ptr
 
+-- | overwrite metadata
 writeMetadata :: Metadata -> Fd -> IO ()
 writeMetadata md fd =
   do fdSeek fd AbsoluteSeek 0
      void . with md $ \ptr ->
        poke ptr md >> fdWriteBuf fd (castPtr ptr) metadataSize
 
-primeFiles :: String -> Config -> [String]
+-- | get the absolute paths of primary files
+primeFiles :: String  -- ^ hecs path
+              -> Config
+              -> [String]
 primeFiles path cfg = map (++ path) (primaryNodes cfg)
 
+-- | get the absolute paths of redundant files
 spareFiles :: String -> Config -> [String]
 spareFiles path cfg = map (++ path) (secondaryNodes cfg)
 
+-- | primeFiles ++ spareFiles
 entireFiles :: String -> Config -> [String]
 entireFiles path cfg = primeFiles path cfg ++ spareFiles path cfg
 
@@ -106,7 +120,9 @@ fileStatusToEntryType status
     | isSocket          status = Socket
     | otherwise                = Unknown
 
-fileStatusToFileStat :: FileStatus -> FileOffset -> FileStat
+fileStatusToFileStat :: FileStatus
+                        -> FileOffset -- ^ size should be explicitly given. use 'calcFileSize'
+                        -> FileStat
 fileStatusToFileStat status size =
     FileStat { statEntryType        = fileStatusToEntryType status
              , statFileMode         = fileMode status
@@ -122,15 +138,17 @@ fileStatusToFileStat status size =
              , statStatusChangeTime = statusChangeTime status
              }
 
-calcFileSize :: Config -> [FileStatus] -> IO FileOffset
-calcFileSize cfg stats =
-  do let k = length . primaryNodes $ cfg
-         size' = sum . map fileSize . take k $ stats
-     return $ size' - (fromIntegral k * metadataSize)
+calcFileSize :: [FileStatus]  -- ^ of only primary files
+                -> IO FileOffset
+calcFileSize stats =
+  do let k = fromIntegral . length $ stats
+         size' = sum . map fileSize $ stats
+     return $ size' - (k * metadataSize)
 
 quotRem' :: (Integral a, Integral a1, Num t, Num t1) => a -> a1 -> (t, t1)
 quotRem' x y = let (q, r) = quotRem (fromIntegral x) (fromIntegral y) in (fromIntegral q, fromIntegral r)
 
+-- | convert the logical location into the corresponding physical locations
 toPhyAddrs :: V.Vector Fd -> FileOffset -> ByteCount -> [(Fd, FileOffset, ByteCount)]
 toPhyAddrs fds off0 len0 = go (quotRem' off0 defaultChunkSize) (fromIntegral len0)
   where
@@ -144,6 +162,7 @@ toPhyAddrs fds off0 len0 = go (quotRem' off0 defaultChunkSize) (fromIntegral len
       let (q, nodeNo) = chunkNo `quotRem` V.length fds
       in (fds V.! nodeNo, fromIntegral q * defaultChunkSize + off, bc)
 
+-- | convert the logical location into the corresponding physical locations
 toPhyChunks :: V.Vector Fd -> FileOffset -> B.ByteString -> [(Fd, FileOffset, B.ByteString)]
 toPhyChunks fds off0 src = slice src $ toPhyAddrs fds off0 (fromIntegral . B.length $ src)
   where slice buf ((fd, off, len):rest)
@@ -172,10 +191,15 @@ readStripe si = V.mapM (\fd -> fdReadBS (fd, fromIntegral si * defaultChunkSize,
 writeStripe :: StripeIndex -> V.Vector Fd -> V.Vector B.ByteString -> IO (V.Vector ByteCount)
 writeStripe si = V.zipWithM (\fd buf -> fdWriteBS (fd, fromIntegral si * defaultChunkSize, buf))
 
+-- | append '\0's to make the size equal to 'defaultChunkSize'
 padZero :: [B.ByteString] -> [B.ByteString]
 padZero = map (\bs -> bs <> B.replicate (defaultChunkSize - B.length bs) 0)
 
-completeStripe :: StripeIndex -> V.Vector Fd -> V.Vector Fd -> IO ()
+-- | read a stripe from the primary files, calculate redundant parts of the stripe, and store them in the spare files.
+completeStripe :: StripeIndex
+                  -> V.Vector Fd -- ^ primary files
+                  -> V.Vector Fd -- ^ spare files
+                  -> IO ()
 completeStripe si primes spares = void $
   let k = V.length primes
       n = k + V.length spares
@@ -193,8 +217,13 @@ splitSize k k' sz =
        go r (replicate k (q * defaultChunkSize))
        <> replicate k' ((q + 1) * defaultChunkSize)
 
-repair :: Int -> Int -> [Fd] -> Fd -> IO ()
-repair k n src trg = do
+-- ^ build the original file from, at least, k partital files
+recover :: Int -- ^ k
+           -> Int -- ^ n
+           -> [Fd] -- ^ partial files
+           -> Fd -- ^ file to be recovered
+           -> IO ()
+recover k n src trg = do
   md <- mapM readMetadata src    -- also, shifting offset as a side-effect
   guard $ and $ zipWith ((==) `on` fst) md (tail md)
   let len = fst $ head md
